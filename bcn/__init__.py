@@ -47,10 +47,22 @@ class Proposition:
 
 @dataclass
 class Constraint:
-    """Represents a soft logical constraint between propositions."""
-    constraint_type: str  # 'exclusion', 'entailment', or 'equivalence'
-    prop_indices: List[int]  # Indices of constrained propositions
-    strength: float  # γ: strength of the constraint
+    """Represents a soft logical constraint between propositions.
+    
+    Attributes:
+        constraint_type: Type of constraint. One of:
+            - 'exclusion' (A ⊥ B): At most one proposition can be true
+            - 'entailment' (A ⇒ B): If A is true, B must be true
+            - 'equivalence' (A ⇔ B): A and B must have the same truth value
+            - 'cardinality': At most 'cardinality' propositions can be true
+        prop_indices: Indices of constrained propositions
+        strength: Strength of the constraint (higher = stronger)
+        cardinality: Maximum number of propositions that can be true (for 'cardinality' type)
+    """
+    constraint_type: str
+    prop_indices: List[int]
+    strength: float = 1.0
+    cardinality: Optional[int] = None  # For 'cardinality' constraint type
 
 class BayesianConsistencyNetwork:
     """
@@ -83,36 +95,55 @@ class BayesianConsistencyNetwork:
         self.observations[(source_idx, prop_idx)] = value
     
     def add_constraint(self, constraint_type: str, prop_indices: List[int], 
-                      strength: float = 1.0) -> None:
+                      strength: float = 1.0, cardinality: Optional[int] = None) -> None:
         """Add a soft logical constraint between propositions.
         
         Args:
             constraint_type: Type of constraint. One of:
-                - 'exclusion' (A ⊥ B): Penalizes A ∧ B (mutual exclusion)
-                - 'entailment' (A ⇒ B): Directional; penalizes A=1 ∧ B=0
-                - 'equivalence' (A ⇔ B): Penalizes A ⊕ B (XOR)
-            prop_indices: List of exactly two proposition indices [i, j]
+                - 'exclusion' (A ⊥ B): At most one proposition can be true
+                - 'entailment' (A ⇒ B): If A is true, B must be true
+                - 'equivalence' (A ⇔ B): A and B must have the same truth value
+                - 'cardinality': At most 'cardinality' propositions can be true
+            prop_indices: List of proposition indices
             strength: Strength of the constraint (higher = stronger)
+            cardinality: For 'cardinality' type, the maximum number of true propositions
             
         Raises:
-            ValueError: If constraint_type is invalid or prop_indices has wrong length
+            ValueError: If constraint_type is invalid or parameters are inconsistent
         """
-        if constraint_type not in {'exclusion', 'entailment', 'equivalence'}:
+        if constraint_type == 'cardinality':
+            if cardinality is None or cardinality < 0:
+                raise ValueError("Cardinality must be a non-negative integer")
+            if len(prop_indices) < 2:
+                raise ValueError("Cardinality constraints require at least 2 propositions")
+        elif constraint_type in {'exclusion', 'entailment', 'equivalence'}:
+            if len(prop_indices) != 2:
+                raise ValueError(f"{constraint_type} constraint requires exactly 2 propositions")
+            if cardinality is not None:
+                raise ValueError(f"Cardinality parameter not supported for {constraint_type} constraint")
+        else:
             raise ValueError(f"Unknown constraint type: {constraint_type}")
-        if len(prop_indices) != 2:
-            raise ValueError("Currently only binary constraints are supported")
         
         constraint = Constraint(
             constraint_type=constraint_type,
             prop_indices=prop_indices,
-            strength=strength
+            strength=strength,
+            cardinality=cardinality if constraint_type == 'cardinality' else None
         )
         self.constraints.append(constraint)
         
         # Update neighbors for message passing
-        i, j = prop_indices
-        self.propositions[i].neighbors.add(j)
-        self.propositions[j].neighbors.add(i)
+        if constraint_type == 'cardinality':
+            # For cardinality constraints, connect all pairs of variables
+            from itertools import combinations
+            for i, j in combinations(prop_indices, 2):
+                self.propositions[i].neighbors.add(j)
+                self.propositions[j].neighbors.add(i)
+        else:
+            # For binary constraints, just connect the two variables
+            i, j = prop_indices
+            self.propositions[i].neighbors.add(j)
+            self.propositions[j].neighbors.add(i)
     
     def _compute_observation_llr(self, source_idx: int, prop_idx: int) -> float:
         """Compute log-likelihood ratio for an observation."""
@@ -132,30 +163,49 @@ class BayesianConsistencyNetwork:
             return stable_log((1 - a) / b)
     
     def _compute_constraint_message(self, constraint: Constraint, target_idx: int) -> float:
-        """Compute the LLR message from a constraint to a target proposition."""
+        """Compute the LLR message from a constraint to a target proposition.
+        
+        Args:
+            constraint: The constraint to compute the message for
+            target_idx: Index of the target proposition
+            
+        Returns:
+            The log-likelihood ratio message from the constraint to the target
+        """
         if constraint.constraint_type == 'exclusion':
-            # p ∧ q is penalized
-            p, q = constraint.prop_indices
-            u = self.propositions[q].belief if p == target_idx else self.propositions[p].belief
-            u = max(min(u, 1 - EPSILON), EPSILON)  # Clip to avoid numerical issues
-            return stable_log(u * math.exp(-constraint.strength) + (1 - u))
+            # For A ⊥ B: message is log P(B=0|A=1) - log P(B=0|A=0)
+            # Which is equivalent to: log(1 - exp(-strength)) when A=1, else 0
+            other_idx = next(p for p in constraint.prop_indices if p != target_idx)
+            other_belief = self.propositions[other_idx].belief
+            return stable_log(1 - math.exp(-constraint.strength * other_belief))
             
         elif constraint.constraint_type == 'entailment':
-            p, q = constraint.prop_indices
-            if target_idx == p:  # Message to p (antecedent)
-                u = max(min(self.propositions[q].belief, 1 - EPSILON), EPSILON)
-                return stable_log(u + (1 - u) * math.exp(-constraint.strength))
-            else:  # Message to q (consequent)
-                u = max(min(self.propositions[p].belief, 1 - EPSILON), EPSILON)
-                return -stable_log((1 - u) + u * math.exp(-constraint.strength))
-                
+            # For A ⇒ B: message is log P(B=1|A=1) - log P(B=1|A=0)
+            # Which is equivalent to: log(1 - exp(-strength)) when A=1, else 0
+            if target_idx == constraint.prop_indices[1]:  # B is the target
+                a_belief = self.propositions[constraint.prop_indices[0]].belief
+                return stable_log(1 - math.exp(-constraint.strength * a_belief))
+            return 0.0
+            
         elif constraint.constraint_type == 'equivalence':
-            p, q = constraint.prop_indices
-            u = self.propositions[q].belief if p == target_idx else self.propositions[p].belief
-            u = max(min(u, 1 - EPSILON), EPSILON)  # Clip to avoid numerical issues
-            return stable_log((u + (1 - u) * math.exp(-constraint.strength)) /
-                            ((1 - u) + u * math.exp(-constraint.strength)))
-        
+            # For A ⇔ B: message is log P(B=1|A=1) - log P(B=1|A=0)
+            # Which is equivalent to: log(1 - exp(-strength)) when A=1, else -strength
+            other_idx = next(p for p in constraint.prop_indices if p != target_idx)
+            other_belief = self.propositions[other_idx].belief
+            if other_belief > 0.5:  # A=1
+                return stable_log(1 - math.exp(-constraint.strength))
+            else:  # A=0
+                return -constraint.strength
+                
+        elif constraint.constraint_type == 'cardinality':
+            # For cardinality constraint: at most k of n propositions can be true
+            # We use a soft constraint that penalizes violations proportionally
+            # to how much the expected number of true variables exceeds k
+            k = constraint.cardinality
+            total_belief = sum(self.propositions[i].belief for i in constraint.prop_indices)
+            excess = max(0, total_belief - k)
+            return -constraint.strength * excess / len(constraint.prop_indices)
+                
         return 0.0
     
     def _update_source_parameters(self) -> None:
@@ -271,8 +321,8 @@ class BayesianConsistencyNetwork:
             - 1: Constraint is maximally violated
             - Values in between indicate partial constraint satisfaction
             
-        The scores are computed as 1 - exp(-strength * violation_probability),
-        which maps the raw violation probability through a saturating function
+        The scores are computed as 1 - exp(-strength * violation_measure),
+        which maps the raw violation measure through a saturating function
         to produce scores in [0,1). This makes the scores more interpretable
         and less sensitive to the absolute scale of the constraint strengths.
         """
@@ -282,26 +332,33 @@ class BayesianConsistencyNetwork:
             if constraint.constraint_type == 'exclusion':
                 # P(p ∧ q) for exclusion
                 p, q = constraint.prop_indices
-                violation_prob = (self.propositions[p].belief * 
-                                self.propositions[q].belief)
-                score = 1 - math.exp(-constraint.strength * violation_prob)
+                violation_measure = (self.propositions[p].belief * 
+                                   self.propositions[q].belief)
                 
             elif constraint.constraint_type == 'entailment':
                 # P(p ∧ ¬q) for p ⇒ q
                 p, q = constraint.prop_indices
-                violation_prob = (self.propositions[p].belief * 
-                                (1 - self.propositions[q].belief))
-                score = 1 - math.exp(-constraint.strength * violation_prob)
+                violation_measure = (self.propositions[p].belief * 
+                                   (1 - self.propositions[q].belief))
                 
             elif constraint.constraint_type == 'equivalence':
                 # P(p ≠ q) for p ⇔ q
                 p, q = constraint.prop_indices
-                violation_prob = (self.propositions[p].belief * 
-                                (1 - self.propositions[q].belief) +
-                                (1 - self.propositions[p].belief) * 
-                                self.propositions[q].belief)
-                score = 1 - math.exp(-constraint.strength * violation_prob)
+                violation_measure = (self.propositions[p].belief * 
+                                   (1 - self.propositions[q].belief) +
+                                   (1 - self.propositions[p].belief) * 
+                                   self.propositions[q].belief)
+                
+            elif constraint.constraint_type == 'cardinality':
+                # For cardinality constraint: measure how much the expected number
+                # of true variables exceeds k, normalized by the number of variables
+                k = constraint.cardinality
+                total_belief = sum(self.propositions[i].belief 
+                                 for i in constraint.prop_indices)
+                excess = max(0, total_belief - k)
+                violation_measure = excess / len(constraint.prop_indices)
             
+            score = 1 - math.exp(-constraint.strength * violation_measure)
             scores.append(score)
         
         return scores
