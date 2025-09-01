@@ -18,12 +18,14 @@ Bayesian Consistency Networks (BCN) is a probabilistic graphical model that serv
   - **Exclusion (A ⊥ B)**: Penalizes A ∧ B (mutual exclusion)
   - **Entailment (A ⇒ B)**: Directional implication that specifically penalizes A=1 ∧ B=0
   - **Equivalence (A ⇔ B)**: Penalizes A ⊕ B (XOR)
+  - **Cardinality / Top-k**: At most *k* of a set may be true
   
 - **Stable Learning**: Uses damping (default 0.5) to ensure stable, oscillation-free updates by moving only partway each iteration
   
 - **Contradiction Scoring**: Each constraint reports a score (0-1) indicating how strained it is under current beliefs, aiding in debugging and trust analysis
   
 - **Source Reliability**: Automatically estimates and adjusts source reliability (sensitivity/specificity) during inference
+- **Correlated-Source Down-weighting**: Optionally reduce influence of near-duplicate sources
 
 1. Infers the most likely truth values of propositions given noisy observations from multiple sources
 2. Incorporates soft logical constraints (exclusion, entailment, equivalence) to resolve contradictions
@@ -109,6 +111,26 @@ for i, prop in enumerate(bcn.propositions):
 # Get contradiction scores
 scores = bcn.get_contradiction_scores()
 print(f"Contradiction scores: {scores}")
+```
+
+### Cardinality / Top-k Example
+
+```python
+from bcn import BayesianConsistencyNetwork
+
+# Enable correlation_penalty to down-weight similar sources
+bcn = BayesianConsistencyNetwork(
+    n_propositions=3, n_sources=1, correlation_penalty=True
+)
+
+for i in range(3):
+    bcn.add_observation(0, i, 1)
+
+# At most one proposition can be true (top-1)
+bcn.add_constraint('topk', [0, 1, 2], strength=2.0, cardinality=1)
+bcn.run_inference()
+print([p.belief for p in bcn.propositions])
+print(bcn.get_metrics())
 ```
 
 ### Running Tests
