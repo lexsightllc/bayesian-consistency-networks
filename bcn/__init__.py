@@ -84,7 +84,19 @@ class BayesianConsistencyNetwork:
     
     def add_constraint(self, constraint_type: str, prop_indices: List[int], 
                       strength: float = 1.0) -> None:
-        """Add a soft logical constraint between propositions."""
+        """Add a soft logical constraint between propositions.
+        
+        Args:
+            constraint_type: Type of constraint. One of:
+                - 'exclusion' (A ⊥ B): Penalizes A ∧ B (mutual exclusion)
+                - 'entailment' (A ⇒ B): Directional; penalizes A=1 ∧ B=0
+                - 'equivalence' (A ⇔ B): Penalizes A ⊕ B (XOR)
+            prop_indices: List of exactly two proposition indices [i, j]
+            strength: Strength of the constraint (higher = stronger)
+            
+        Raises:
+            ValueError: If constraint_type is invalid or prop_indices has wrong length
+        """
         if constraint_type not in {'exclusion', 'entailment', 'equivalence'}:
             raise ValueError(f"Unknown constraint type: {constraint_type}")
         if len(prop_indices) != 2:
@@ -213,10 +225,27 @@ class BayesianConsistencyNetwork:
     def run_inference(self, max_iter: int = 100, tol: float = 1e-4, 
                      max_em_iter: int = 10, em_tol: float = 1e-3,
                      damping: float = 0.5) -> None:
-        """Run variational EM to infer beliefs and source parameters."""
-        for _ in range(max_em_iter):
+        """Run variational EM to infer beliefs and source parameters.
+        
+        Args:
+            max_iter: Maximum BP iterations per E-step
+            tol: Convergence tolerance for BP (belief change)
+            max_em_iter: Maximum EM iterations
+            em_tol: Convergence tolerance for EM (parameter change)
+            damping: Damping factor (0.0-1.0) for belief updates. 
+                   Lower values make updates more stable but slower.
+                   
+        The algorithm alternates between:
+        1. E-step: Update beliefs using current source parameters
+        2. M-step: Update source parameters using current beliefs
+        
+        Convergence is reached when either:
+        - Beliefs change by less than `tol` (BP convergence), or
+        - Parameters change by less than `em_tol` (EM convergence)
+        """
+        for em_step in range(max_em_iter):
             # E-step: Run BP to convergence
-            for _ in range(max_iter):
+            for bp_step in range(max_iter):
                 max_delta = self.belief_propagation_step(damping)
                 if max_delta < tol:
                     break
@@ -227,15 +256,26 @@ class BayesianConsistencyNetwork:
             
             # Check for EM convergence
             param_diff = max(
-                abs(s.sensitivity - old_sens) + abs(s.specificity - old_spec)
-                for s, (old_sens, old_spec) in zip(self.sources, old_params)
+                abs(s.sensitivity - old_s) + abs(s.specificity - old_p)
+                for (old_s, old_p), s in zip(old_params, self.sources)
             )
-            
             if param_diff < em_tol:
                 break
     
     def get_contradiction_scores(self) -> List[float]:
-        """Compute contradiction scores for each constraint in [0,1]."""
+        """Compute contradiction scores for each constraint in [0,1].
+        
+        Returns:
+            List of scores, one per constraint, where:
+            - 0: Constraint is perfectly satisfied
+            - 1: Constraint is maximally violated
+            - Values in between indicate partial constraint satisfaction
+            
+        The scores are computed as 1 - exp(-strength * violation_probability),
+        which maps the raw violation probability through a saturating function
+        to produce scores in [0,1). This makes the scores more interpretable
+        and less sensitive to the absolute scale of the constraint strengths.
+        """
         scores = []
         
         for constraint in self.constraints:

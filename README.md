@@ -10,7 +10,20 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## Overview
 
-Bayesian Consistency Networks (BCN) is a probabilistic graphical model that:
+Bayesian Consistency Networks (BCN) is a probabilistic graphical model that serves as a robust framework for resolving contradictions in binary claims. It acts as a 'probabilistic referee' that:
+
+### Key Features
+
+- **Soft Logical Constraints**: Incorporates flexible rules between propositions:
+  - **Exclusion (A ⊥ B)**: Penalizes A ∧ B (mutual exclusion)
+  - **Entailment (A ⇒ B)**: Directional implication that specifically penalizes A=1 ∧ B=0
+  - **Equivalence (A ⇔ B)**: Penalizes A ⊕ B (XOR)
+  
+- **Stable Learning**: Uses damping (default 0.5) to ensure stable, oscillation-free updates by moving only partway each iteration
+  
+- **Contradiction Scoring**: Each constraint reports a score (0-1) indicating how strained it is under current beliefs, aiding in debugging and trust analysis
+  
+- **Source Reliability**: Automatically estimates and adjusts source reliability (sensitivity/specificity) during inference
 
 1. Infers the most likely truth values of propositions given noisy observations from multiple sources
 2. Incorporates soft logical constraints (exclusion, entailment, equivalence) to resolve contradictions
@@ -26,6 +39,48 @@ pip install -e .
 ```
 
 ## Usage
+
+### Practical Example: Fact-Checking News
+
+Here's how BCN can resolve conflicting claims about a news event:
+
+```python
+from bcn import BayesianConsistencyNetwork
+
+# Initialize with 2 claims and 2 sources
+bcn = BayesianConsistencyNetwork(n_propositions=2, n_sources=2)
+
+# Source 0 (reliable but not perfect) says:
+# - Claim 0: "The event happened on Monday" (True)
+# - Claim 1: "The event was canceled" (False)
+bcn.add_observation(0, 0, 1)  # Source 0, Claim 0 = true
+bcn.add_observation(0, 1, 1)  # Source 0, Claim 1 = true
+
+# Source 1 (less reliable) says:
+# - Claim 0: "The event happened on Monday" (True)
+# - Claim 1: "The event was not canceled" (True)
+bcn.add_observation(1, 0, 1)  # Source 1, Claim 0 = true
+bcn.add_observation(1, 1, 0)  # Source 1, Claim 1 = false
+
+# Add constraint: These claims are mutually exclusive
+# (An event can't be both canceled and not canceled)
+bcn.add_constraint('exclusion', [0, 1], strength=2.0)
+
+# Run inference
+bcn.run_inference()
+
+# Check results
+for i, prop in enumerate(bcn.propositions):
+    print(f"Claim {i}: P(True) = {prop.belief:.3f}")
+
+# Check contradiction scores
+scores = bcn.get_contradiction_scores()
+print(f"Contradiction score: {scores[0]:.3f} (closer to 1 means more contradictory)")
+
+# Check source reliability
+for i, source in enumerate(bcn.sources):
+    print(f"Source {i}: sensitivity={source.sensitivity:.3f}, specificity={source.specificity:.3f}")
+```
 
 ### Basic Example
 
@@ -62,23 +117,55 @@ print(f"Contradiction scores: {scores}")
 python -m pytest tests/
 ```
 
-## Model Details
+## How It Works
 
-### Key Components
+BCN combines belief propagation with variational EM in an iterative process:
+
+1. **Message Passing**: Each source's claims are weighted by their reliability
+2. **Constraint Satisfaction**: Soft rules push beliefs toward consistency
+3. **Source Reliability Update**: Sources are re-weighted based on agreement with consensus
+4. **Damping**: Updates are smoothed (default: 0.5) to prevent oscillation
+5. **Convergence**: Process repeats until beliefs stabilize
+
+### Technical Details
+
+#### Key Components
 
 1. **Propositions**: Binary variables representing claims that can be true or false
 2. **Sources**: Information providers with unknown reliability (sensitivity and specificity)
 3. **Observations**: Binary claims made by sources about propositions
-4. **Constraints**: Soft logical rules between propositions (exclusion, entailment, equivalence)
+4. **Constraints**: Soft logical rules between propositions:
+   - **Exclusion (A ⊥ B)**: Penalizes A ∧ B (mutual exclusion)
+   - **Entailment (A ⇒ B)**: Directional; penalizes A=1 ∧ B=0
+   - **Equivalence (A ⇔ B)**: Penalizes A ⊕ B (XOR)
 
-### Inference
+#### Inference Process
 
-The model uses:
-- **Belief Propagation (BP)**: For approximate inference over the factor graph
-- **Variational EM**: For jointly estimating source parameters and beliefs
-- **Damped Updates**: For numerical stability during belief propagation
+1. **Initialization**: Start with uniform beliefs and source parameters
+2. **E-step**: Update beliefs using current source parameters
+3. **M-step**: Update source parameters using current beliefs
+4. **Damping**: Apply smoothing to prevent oscillation (default: 0.5)
+5. **Convergence**: Stop when beliefs change by less than tolerance
 
 ## Advanced Usage
+
+### Tuning Parameters
+
+```python
+# Run inference with custom parameters
+bcn.run_inference(
+    max_iter=100,      # Max BP iterations per E-step
+    tol=1e-4,          # Convergence tolerance for BP
+    max_em_iter=10,    # Max EM iterations
+    em_tol=1e-3,       # Convergence tolerance for EM
+    damping=0.5        # Damping factor (0.5 = half of update applied each step)
+)
+
+# Get detailed diagnostics
+contradiction_scores = bcn.get_contradiction_scores()  # Per-constraint scores [0,1)
+for i, score in enumerate(contradiction_scores):
+    print(f"Constraint {i} contradiction: {score:.3f}")
+```
 
 ### Custom Priors
 
@@ -116,9 +203,9 @@ bcn.run_inference(
 
 ## References
 
-1. Pasternack, J., & Roth, D. (2010). "Latent Credibility Analysis." WWW.
-2. Pasternack, J., & Roth, D. (2013). "Making Better Informed Trust Decisions with Generalized Fact-Finding." IJCAI.
-3. Zhao, B., Rubinstein, B. I., Gemmell, J., & Han, J. (2012). "A Bayesian Approach to Discovering Truth from Conflicting Sources for Data Integration." PVLDB.
+1. Pasternack, J., & Roth, D. (2010). "Latent Credibility Analysis."
+2. Pasternack, J., & Roth, D. (2013). "Making Better Informed Trust Decisions with Generalized Fact-Finding."
+3. Zhao, B., Rubinstein, B. I., Gemmell, J., & Han, J. (2012). "A Bayesian Approach to Discovering Truth from Conflicting Sources for Data Integration." 
 
 ## License
 
