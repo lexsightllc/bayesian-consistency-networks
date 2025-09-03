@@ -12,6 +12,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+__version__ = "1.2.0"
+
 # Small constant for numerical stability
 EPSILON = 1e-10
 
@@ -66,14 +68,12 @@ class Constraint:
         prop_indices: Indices of constrained propositions
         strength: Strength of the constraint (higher = stronger)
         cardinality: Maximum number of propositions that can be true (for 'cardinality' type)
-        topk_alias: Whether the constraint was added via the 'topk' alias
     """
 
     constraint_type: str
     prop_indices: List[int]
     strength: float = 1.0
     cardinality: Optional[int] = None  # For 'cardinality' constraint type
-    topk_alias: bool = False
 
 
 class BayesianConsistencyNetwork:
@@ -143,10 +143,9 @@ class BayesianConsistencyNetwork:
         Raises:
             ValueError: If constraint_type is invalid or parameters are inconsistent
         """
-        alias_topk = False
         if constraint_type == "topk":
-            alias_topk = True
             constraint_type = "cardinality"
+            # 'topk' is kept as an alias for 'cardinality' for backward compatibility
 
         if constraint_type == "cardinality":
             if cardinality is None or cardinality < 0:
@@ -172,7 +171,6 @@ class BayesianConsistencyNetwork:
             prop_indices=prop_indices,
             strength=strength,
             cardinality=cardinality if constraint_type == "cardinality" else None,
-            topk_alias=alias_topk,
         )
         self.constraints.append(constraint)
 
@@ -242,6 +240,11 @@ class BayesianConsistencyNetwork:
                 return stable_log(u + (1 - u) * math.exp(-gamma))
             else:
                 u = self.propositions[p_idx].belief
+                # Message from p to q when q is the target. The LLR captures
+                # log P(q=1) - log P(q=0) under p ⇒ q, where the violation
+                # probability is exp(-gamma) when p is true and q is false.
+                # LLR = log((1-u)*1 + u*1) - log((1-u)*1 + u*exp(-gamma))
+                #     = -log((1-u) + u*exp(-gamma))
                 return -stable_log((1 - u) + u * math.exp(-gamma))
 
         if constraint.constraint_type == "cardinality":
@@ -275,19 +278,22 @@ class BayesianConsistencyNetwork:
                     tn += 1 - b  # True negative
 
             # Update with Beta posterior mean (clipped for stability)
+            # Posterior mean: (alpha_prior + successes) / (alpha_prior + beta_prior + total)
+            # For sensitivity: successes=tp, total=tp+fn
             source.sensitivity = max(
                 min(
-                    (source.alpha_a + tp - 1)
-                    / (source.alpha_a + source.beta_a + tp + fn - 2),
+                    (source.alpha_a + tp)
+                    / (source.alpha_a + source.beta_a + tp + fn),
                     1 - EPSILON,
                 ),
                 EPSILON,
             )
 
+            # For specificity: successes=tn, total=tn+fp
             source.specificity = max(
                 min(
-                    (source.alpha_b + tn - 1)
-                    / (source.alpha_b + source.beta_b + tn + fp - 2),
+                    (source.alpha_b + tn)
+                    / (source.alpha_b + source.beta_b + tn + fp),
                     1 - EPSILON,
                 ),
                 EPSILON,

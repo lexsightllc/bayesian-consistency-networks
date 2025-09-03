@@ -77,5 +77,5 @@ def test_cardinality_k0_enforces_exclusion():
 
 
 if __name__ == "__main__":
-    test_cardinality_constraint()
+    test_cardinality_k1_lowers_sum()
     test_cardinality_with_exclusion()
